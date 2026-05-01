@@ -268,3 +268,14 @@ Os servidores enviam mensagens periódicas ao coordenador (a cada 10 mensagens p
 * `server`: relógio lógico + heartbeat + sincronização
 * `coordenador`: novo serviço adicionado
 * `docker-compose`: atualizado com o serviço de coordenação
+
+## 🗳️ Eleição de Coordenador
+
+Nesta etapa foi implementado um mecanismo de eleição de coordenador entre os servidores do sistema distribuído.
+
+Cada servidor se registra no coordenador e recebe um **rank único**. A escolha do coordenador é baseada no maior rank disponível na lista de servidores ativos.
+
+Os servidores realizam verificações periódicas utilizando um mecanismo de **heartbeat**, consultando o coordenador para obter a lista atualizada de participantes. Caso o coordenador falhe ou deixe de responder, os servidores detectam a falha e executam automaticamente uma nova eleição.
+
+Esse processo garante a continuidade do sistema, permitindo que outro servidor assuma o papel de coordenador sem interromper o funcionamento da aplicação, assegurando **tolerância a falhas** e maior confiabilidade.
+

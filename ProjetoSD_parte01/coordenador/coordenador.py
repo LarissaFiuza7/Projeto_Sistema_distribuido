@@ -4,14 +4,14 @@ import time
 
 context = zmq.Context()
 socket = context.socket(zmq.REP)
-socket.bind("tcp://*:5560")  # porta do coordenador
+socket.bind("tcp://*:5560")
 
 print("Coordenador iniciado...")
 
-servidores = {}  # nome -> {rank, last_seen}
+servidores = {}
 rank_counter = 1
 
-TIMEOUT = 15  # segundos sem heartbeat = remover
+TIMEOUT = 60
 
 def limpar_servidores():
     agora = time.time()
@@ -34,7 +34,7 @@ while True:
 
     limpar_servidores()
 
-    # 🔹 1. REGISTRAR SERVIDOR (RANK)
+    # 🔹 REGISTER
     if tipo == "register":
         nome = dados["nome"]
 
@@ -52,7 +52,7 @@ while True:
             }
         }
 
-    # 🔹 2. LISTAR SERVIDORES
+    # 🔹 LISTA SERVIDORES
     elif tipo == "get_servers":
         lista = [
             {"nome": nome, "rank": info["rank"]}
@@ -64,7 +64,7 @@ while True:
             "dados": lista
         }
 
-    # 🔹 3. HEARTBEAT + RELÓGIO
+    # 🔹 HEARTBEAT (AGORA SEM HORA)
     elif tipo == "heartbeat":
         nome = dados["nome"]
 
@@ -72,13 +72,14 @@ while True:
             servidores[nome]["last_seen"] = time.time()
 
         resposta = {
-            "tipo": "heartbeat_ok",
-            "dados": {
-                "hora_correta": time.time()
-            }
+            "tipo": "heartbeat_ok"
         }
 
+    # 🔹 ERRO
     else:
-        resposta = {"tipo": "erro", "dados": "comando inválido"}
+        resposta = {
+            "tipo": "erro",
+            "dados": "comando inválido"
+        }
 
     socket.send(msgpack.packb(resposta))

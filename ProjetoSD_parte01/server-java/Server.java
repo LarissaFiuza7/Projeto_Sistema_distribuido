@@ -5,8 +5,14 @@ import org.msgpack.value.*;
 public class Server {
 
     static int clock = 0;
-    static int contadorMensagens = 0;
     static String nomeServidor = "servidor-" + System.currentTimeMillis();
+
+    static int meuRank = 0;
+    static String coordenadorAtual = null;
+
+    //  HEARTBEAT POR TEMPO
+    static long ultimoHeartbeat = System.currentTimeMillis();
+    static final int INTERVALO = 5000; // 5 segundos
 
     public static void main(String[] args) {
 
@@ -14,16 +20,24 @@ public class Server {
 
         ZMQ.Context context = ZMQ.context(1);
 
-        // conexão com broker
         ZMQ.Socket socket = context.socket(ZMQ.REP);
         socket.connect("tcp://broker:5556");
 
-        // conexão com coordenador
         ZMQ.Socket coord = context.socket(ZMQ.REQ);
         coord.connect("tcp://coordenador:5560");
 
-        // 🔥 REGISTRAR SERVIDOR
         registrarServidor(coord);
+
+        try {
+            Value lista = pedirServidores(coord);
+            System.out.println("Lista recebida: " + lista);
+
+            coordenadorAtual = elegerCoordenador(lista);
+            System.out.println("Coordenador atual: " + coordenadorAtual);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
 
         while (true) {
 
@@ -35,7 +49,6 @@ public class Server {
 
                 int clockRecebido = 0;
 
-                // pegar clock
                 if (v.isMapValue()) {
                     MapValue map = v.asMapValue();
 
@@ -46,23 +59,19 @@ public class Server {
                     }
                 }
 
-                // atualizar clock lógico
+                // CLOCK LÓGICO
                 clock = Math.max(clock, clockRecebido) + 1;
+                System.out.println("Clock servidor: " + clock);
 
-                System.out.println("Clock servidor (recebeu): " + clock);
-
-                // incrementar antes de responder
                 clock++;
 
-                // 🔥 CONTADOR DE MENSAGENS
-                contadorMensagens++;
-
-                // 🔥 A CADA 10 MENSAGENS → HEARTBEAT
-                if (contadorMensagens % 10 == 0) {
-                    enviarHeartbeat(coord);
+                // 01 HEARTBEAT POR TEMPO
+                if (System.currentTimeMillis() - ultimoHeartbeat > INTERVALO) {
+                    verificarCoordenador(coord);
+                    ultimoHeartbeat = System.currentTimeMillis();
                 }
 
-                // resposta
+                // 🔹 RESPOSTA
                 MessageBufferPacker packer = MessagePack.newDefaultBufferPacker();
 
                 packer.packMapHeader(4);
@@ -89,7 +98,6 @@ public class Server {
         }
     }
 
-    // 🔹 REGISTRO NO COORDENADOR
     public static void registrarServidor(ZMQ.Socket coord) {
         try {
             MessageBufferPacker packer = MessagePack.newDefaultBufferPacker();
@@ -113,15 +121,79 @@ public class Server {
             MessageUnpacker unpacker = MessagePack.newDefaultUnpacker(reply);
             Value v = unpacker.unpackValue();
 
-            System.out.println("Registrado no coordenador: " + v);
+            System.out.println("Registrado: " + v);
+
+            MapValue map = v.asMapValue();
+            Value dados = map.map().get(ValueFactory.newString("dados"));
+
+            meuRank = dados.asMapValue()
+                    .map()
+                    .get(ValueFactory.newString("rank"))
+                    .asIntegerValue()
+                    .asInt();
+
+            System.out.println("Meu rank: " + meuRank);
 
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    // 🔹 HEARTBEAT + RELÓGIO FÍSICO
-    public static void enviarHeartbeat(ZMQ.Socket coord) {
+    public static Value pedirServidores(ZMQ.Socket coord) throws Exception {
+
+        MessageBufferPacker packer = MessagePack.newDefaultBufferPacker();
+
+        packer.packMapHeader(1);
+        packer.packString("tipo");
+        packer.packString("get_servers");
+
+        packer.close();
+
+        coord.send(packer.toByteArray());
+
+        byte[] reply = coord.recv();
+
+        MessageUnpacker unpacker = MessagePack.newDefaultUnpacker(reply);
+        return unpacker.unpackValue();
+    }
+
+    public static String elegerCoordenador(Value resposta) {
+
+        int maiorRank = -1;
+        String eleito = null;
+
+        MapValue map = resposta.asMapValue();
+        Value dados = map.map().get(ValueFactory.newString("dados"));
+
+        if (dados == null || !dados.isArrayValue()) {
+            return null;
+        }
+
+        for (Value item : dados.asArrayValue()) {
+
+            MapValue servidor = item.asMapValue();
+
+            String nome = servidor.map()
+                    .get(ValueFactory.newString("nome"))
+                    .asStringValue()
+                    .asString();
+
+            int rank = servidor.map()
+                    .get(ValueFactory.newString("rank"))
+                    .asIntegerValue()
+                    .asInt();
+
+            if (rank > maiorRank) {
+                maiorRank = rank;
+                eleito = nome;
+            }
+        }
+
+        return eleito;
+    }
+
+    public static void verificarCoordenador(ZMQ.Socket coord) {
+
         try {
             MessageBufferPacker packer = MessagePack.newDefaultBufferPacker();
 
@@ -138,26 +210,20 @@ public class Server {
             packer.close();
 
             coord.send(packer.toByteArray());
+            coord.recv();
 
-            byte[] reply = coord.recv();
+            Value lista = pedirServidores(coord);
+            System.out.println("Lista heartbeat: " + lista);
 
-            MessageUnpacker unpacker = MessagePack.newDefaultUnpacker(reply);
-            Value v = unpacker.unpackValue();
+            String novo = elegerCoordenador(lista);
 
-            // pegar hora correta
-            double hora = v.asMapValue()
-                .map()
-                .get(ValueFactory.newString("dados"))
-                .asMapValue()
-                .map()
-                .get(ValueFactory.newString("hora_correta"))
-                .asFloatValue()
-                .toDouble();
-
-            System.out.println("Heartbeat OK | Hora sincronizada: " + hora);
+            if (coordenadorAtual == null || !coordenadorAtual.equals(novo)) {
+                System.out.println("Novo coordenador: " + novo);
+                coordenadorAtual = novo;
+            }
 
         } catch (Exception e) {
-            e.printStackTrace();
+            System.out.println("Falha no coordenador");
         }
     }
 }
