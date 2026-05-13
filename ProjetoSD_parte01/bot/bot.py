@@ -5,7 +5,7 @@ import time
 context = zmq.Context()
 
 socket = context.socket(zmq.SUB)
-socket.connect("tcp://proxy_pubsub:5557")
+socket.connect("tcp://proxy_pubsub:5558")
 
 #  ESCUTA TODOS CANAIS
 socket.setsockopt_string(zmq.SUBSCRIBE, "")

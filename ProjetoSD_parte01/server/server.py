@@ -2,96 +2,141 @@ import zmq
 import msgpack
 import time
 import threading
+import json
+import os
 
 context = zmq.Context()
 
 # =========================
-# SOCKET CLIENTES (BROKER)
+# PERSISTÊNCIA
 # =========================
+
+def carregar_arquivo(nome):
+
+    caminho = f"data/{nome}"
+
+    if os.path.exists(caminho):
+
+        with open(caminho, "r") as f:
+            return json.load(f)
+
+    return []
+
+
+def salvar_arquivo(nome, dados):
+
+    caminho = f"data/{nome}"
+
+    with open(caminho, "w") as f:
+        json.dump(dados, f, indent=4)
+
+
+usuarios = carregar_arquivo("usuarios.json")
+canais = carregar_arquivo("canais.json")
+mensagens = carregar_arquivo("mensagens.json")
+
+# =========================
+# BROKER
+# =========================
+
 socket = context.socket(zmq.REP)
 socket.connect("tcp://broker:5556")
 
 # =========================
-# SOCKET COORDENADOR
+# COORDENADOR
 # =========================
+
 coord = context.socket(zmq.REQ)
 coord.connect("tcp://coordenador:5560")
 
 # =========================
-# PUB / SUB (REPLICAÇÃO + ELEIÇÃO)
+# PUB/SUB
 # =========================
+
 pub = context.socket(zmq.PUB)
 pub.connect("tcp://proxy_pubsub:5557")
 
 sub = context.socket(zmq.SUB)
 sub.connect("tcp://proxy_pubsub:5558")
 
-# canais
 sub.setsockopt_string(zmq.SUBSCRIBE, "servers")
 sub.setsockopt_string(zmq.SUBSCRIBE, "replica")
 
 # =========================
-# IDENTIFICAÇÃO
+# VARIÁVEIS
 # =========================
-nome_servidor = f"servidor-py-{time.time()}"
 
-meu_rank = 0
-coordenador_atual = None
+nome = f"servidor-py-{time.time()}"
+rank = 0
+coordenador = None
 
-# =========================
-# CLOCK / ESTADO
-# =========================
 clock = 0
-contador_mensagens = 0
-INTERVALO = 2
+contador = 0
 
-# =========================
-# HISTÓRICO (PARTE 5)
-# =========================
 historico = []
+
+INTERVALO = 2
 
 # =========================
 # REGISTRO
 # =========================
+
 def registrar():
 
-    global meu_rank
+    global rank
 
     msg = {
         "tipo": "register",
-        "dados": {"nome": nome_servidor}
+        "dados": {
+            "nome": nome
+        }
     }
 
     coord.send(msgpack.packb(msg))
-    resposta = msgpack.unpackb(coord.recv(), raw=False)
 
-    meu_rank = resposta["dados"]["rank"]
-    print("Registrado com rank:", meu_rank)
+    resp = msgpack.unpackb(
+        coord.recv(),
+        raw=False
+    )
+
+    rank = resp["dados"]["rank"]
+
+    print("Registrado rank:", rank)
 
 
 # =========================
-# LISTA SERVIDORES
+# PEDIR SERVIDORES
 # =========================
+
 def pedir_servidores():
 
-    msg = {"tipo": "get_servers"}
+    coord.send(
+        msgpack.packb({
+            "tipo": "get_servers"
+        })
+    )
 
-    coord.send(msgpack.packb(msg))
-    return msgpack.unpackb(coord.recv(), raw=False)
+    return msgpack.unpackb(
+        coord.recv(),
+        raw=False
+    )
 
 
 # =========================
 # ELEIÇÃO
 # =========================
+
 def eleger(lista):
 
     maior = -1
     eleito = None
 
-    for srv in lista["dados"]:
-        if srv["rank"] > maior:
-            maior = srv["rank"]
-            eleito = srv["nome"]
+    for s in lista["dados"]:
+
+        if s["rank"] > maior:
+
+            maior = s["rank"]
+            eleito = s["nome"]
 
     return eleito
 
@@ -99,25 +144,34 @@ def eleger(lista):
 # =========================
 # PUBLICAR COORDENADOR
 # =========================
-def publicar_coordenador(nome):
 
-    payload = {"coordenador": nome}
-    mensagem = "servers " + msgpack.packb(payload).hex()
+def publicar_coord(nome_coord):
 
-    pub.send_string(mensagem)
-    print("Coordenador publicado:", nome)
+    payload = {
+        "tipo": "coordenador",
+        "coordenador": nome_coord
+    }
+
+    pub.send_string(
+        "servers " +
+        msgpack.packb(payload).hex()
+    )
 
 
 # =========================
-# PUB/SUB LISTENER
+# OUVIR PUBSUB
 # =========================
+
 def ouvir_pubsub():
 
-    global coordenador_atual
+    global coordenador
 
     while True:
+
         try:
+
             msg = sub.recv_string()
+
             canal, payload_hex = msg.split(" ", 1)
 
             payload = msgpack.unpackb(
@@ -125,151 +179,342 @@ def ouvir_pubsub():
                 raw=False
             )
 
-            # =========================
-            # ELEIÇÃO
-            # =========================
             if canal == "servers":
-                coordenador_atual = payload["coordenador"]
-                print("Novo coordenador:", coordenador_atual)
 
-            # =========================
-            # REPLICAÇÃO (PARTE 5)
-            # =========================
+                novo = payload["coordenador"]
+
+                if novo != coordenador:
+
+                    coordenador = novo
+
+                    print(
+                        "Novo coordenador:",
+                        coordenador
+                    )
+
             elif canal == "replica":
 
-                dado = payload["dados"]
+                historico.append(
+                    payload["dados"]
+                )
 
-                historico.append(dado)
-
-                print("📦 Replica recebida:", dado)
+                print(
+                    "Replica recebida:",
+                    payload["dados"]
+                )
 
         except Exception as e:
+
             print("Erro SUB:", e)
 
 
 # =========================
-# HEARTBEAT / ELEIÇÃO
+# HEARTBEAT
 # =========================
+
 def heartbeat():
 
-    global coordenador_atual
+    global coordenador
+
+    ultimo = None
 
     while True:
+
         try:
 
-            msg = {
-                "tipo": "heartbeat",
-                "dados": {"nome": nome_servidor}
-            }
+            coord.send(
+                msgpack.packb({
+                    "tipo": "heartbeat",
+                    "dados": {
+                        "nome": nome
+                    }
+                })
+            )
 
-            coord.send(msgpack.packb(msg))
             coord.recv()
 
             lista = pedir_servidores()
+
             novo = eleger(lista)
 
-            if coordenador_atual != novo:
+            if novo != coordenador:
 
-                coordenador_atual = novo
-                publicar_coordenador(novo)
+                coordenador = novo
 
-                print("REQ eleição")
-                print("REP OK")
+                publicar_coord(novo)
 
-            print("Coordenador atual:", coordenador_atual)
+                print(
+                    "Novo coord eleito:",
+                    novo
+                )
 
-        except Exception as e:
-            print("Erro heartbeat:", e)
+            if ultimo != coordenador:
+
+                print(
+                    "Coordenador atual:",
+                    coordenador
+                )
+
+                ultimo = coordenador
+
+        except:
+
+            print("Erro heartbeat")
 
         time.sleep(INTERVALO)
 
 
 # =========================
-# SINCRONIZAÇÃO CLOCK
+# BERKELEY
 # =========================
-def sincronizar_relogio():
 
-    global clock
+def sync_clock():
 
     try:
 
-        msg = {"tipo": "sync_clock"}
+        coord.send(
+            msgpack.packb({
+                "tipo": "sync_clock"
+            })
+        )
 
-        coord.send(msgpack.packb(msg))
-        resposta = msgpack.unpackb(coord.recv(), raw=False)
+        resp = msgpack.unpackb(
+            coord.recv(),
+            raw=False
+        )
 
-        clock = max(clock, int(resposta["dados"]["hora"]))
+        print("Berkeley sync:", resp)
 
-        print("Relógio sincronizado:", clock)
+    except:
 
-    except Exception as e:
-        print("Erro sync:", e)
+        print("Erro Berkeley sync")
 
 
 # =========================
 # INICIALIZAÇÃO
 # =========================
+
 registrar()
 
 lista = pedir_servidores()
-coordenador_atual = eleger(lista)
 
-print("Coordenador inicial:", coordenador_atual)
+coordenador = eleger(lista)
 
-threading.Thread(target=heartbeat, daemon=True).start()
-threading.Thread(target=ouvir_pubsub, daemon=True).start()
+print("Coord inicial:", coordenador)
 
+threading.Thread(
+    target=heartbeat,
+    daemon=True
+).start()
+
+threading.Thread(
+    target=ouvir_pubsub,
+    daemon=True
+).start()
 
 # =========================
-# LOOP PRINCIPAL (CLIENTES)
+# LOOP PRINCIPAL
 # =========================
+
 while True:
 
     try:
 
-        msg = msgpack.unpackb(socket.recv(), raw=False)
+        msg = msgpack.unpackb(
+            socket.recv(),
+            raw=False
+        )
 
-        clock_recebido = msg.get("clock", 0)
-        clock = max(clock, clock_recebido) + 1
+        tipo = msg.get("tipo")
 
-        contador_mensagens += 1
+        dados = msg.get("dados", {})
+
+        clock_recebido = msg.get(
+            "clock",
+            0
+        )
+
+        clock = max(
+            clock,
+            clock_recebido
+        ) + 1
+
+        contador += 1
 
         # =========================
-        # SALVA HISTÓRICO LOCAL
+        # LOGIN
         # =========================
-        historico.append({
-            "clock": clock,
-            "msg": msg
-        })
 
-        # =========================
-        # REPLICA PARA OUTROS SERVIDORES
-        # =========================
-        replica = {
-            "tipo": "replica",
-            "dados": {
-                "clock": clock,
-                "msg": msg
+        if tipo == "login":
+
+            usuario = dados["usuario"]
+
+            existe = False
+
+            for u in usuarios:
+
+                if u["usuario"] == usuario:
+
+                    existe = True
+
+            if not existe:
+
+                usuarios.append({
+                    "usuario": usuario,
+                    "timestamp": time.time()
+                })
+
+                salvar_arquivo(
+                    "usuarios.json",
+                    usuarios
+                )
+
+                print(
+                    "Usuário salvo:",
+                    usuario
+                )
+
+            resposta = {
+                "tipo": "login_ok",
+                "clock": clock
             }
+
+            socket.send(
+                msgpack.packb(resposta)
+            )
+
+            continue
+
+        # =========================
+        # CHANNEL
+        # =========================
+
+        if tipo == "channel":
+
+            nome_canal = dados["nome"]
+
+            if nome_canal not in canais:
+
+                canais.append(nome_canal)
+
+                salvar_arquivo(
+                    "canais.json",
+                    canais
+                )
+
+                print(
+                    "Canal criado:",
+                    nome_canal
+                )
+
+            resposta = {
+                "tipo": "channel_ok",
+                "clock": clock
+            }
+
+            socket.send(
+                msgpack.packb(resposta)
+            )
+
+            continue
+
+        # =========================
+        # LIST CHANNELS
+        # =========================
+
+        if tipo == "list_channels":
+
+            resposta = {
+                "tipo": "channels_list",
+                "dados": canais,
+                "clock": clock
+            }
+
+            socket.send(
+                msgpack.packb(resposta)
+            )
+
+            continue
+
+        # =========================
+        # PUBLICAÇÃO
+        # =========================
+
+        if tipo == "publish":
+
+            mensagens.append({
+                "canal": dados["canal"],
+                "mensagem": dados["mensagem"],
+                "timestamp": time.time(),
+                "clock": clock
+            })
+
+            salvar_arquivo(
+                "mensagens.json",
+                mensagens
+            )
+
+            payload = {
+                "mensagem": dados["mensagem"],
+                "timestamp_envio": time.time(),
+                "clock": clock
+            }
+
+            pub.send_string(
+                dados["canal"] +
+                " " +
+                msgpack.packb(payload).hex()
+            )
+
+            print(
+                "Mensagem publicada:",
+                dados["mensagem"]
+            )
+
+        # =========================
+        # REPLICAÇÃO
+        # =========================
+
+        registro = {
+            "server": nome,
+            "msg": msg,
+            "clock": clock
         }
 
-        pub.send_string("replica " + msgpack.packb(replica).hex())
+        historico.append(registro)
 
-        print("Clock:", clock)
-        print("Mensagens:", contador_mensagens)
+        pub.send_string(
+            "replica " +
+            msgpack.packb({
+                "tipo": "replica",
+                "dados": registro
+            }).hex()
+        )
 
-        # sincroniza
-        if contador_mensagens >= 15:
-            sincronizar_relogio()
-            contador_mensagens = 0
+        # =========================
+        # BERKELEY
+        # =========================
+
+        if contador >= 15:
+
+            sync_clock()
+
+            contador = 0
+
+        # =========================
+        # RESPOSTA
+        # =========================
 
         resposta = {
             "clock": clock,
             "tipo": "resposta",
-            "dados": "OK servidor Python"
+            "dados": "OK Python"
         }
 
-        socket.send(msgpack.packb(resposta))
+        socket.send(
+            msgpack.packb(resposta)
+        )
 
     except Exception as e:
-        print("Erro servidor:", e)
+
+        print("Erro server:", e)

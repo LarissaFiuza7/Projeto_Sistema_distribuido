@@ -1,220 +1,155 @@
 import org.zeromq.ZMQ;
-import org.msgpack.core.*;
-import org.msgpack.value.*;
+
+import org.msgpack.core.MessageBufferPacker;
+import org.msgpack.core.MessagePack;
+import org.msgpack.core.MessageUnpacker;
+
+import org.msgpack.value.MapValue;
+import org.msgpack.value.Value;
+import org.msgpack.value.ValueFactory;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class Server {
 
-    // =========================
-    // CLOCK LÓGICO
-    // =========================
     static int clock = 0;
+    static int contador = 0;
 
-    // =========================
-    // CONTADOR DE MENSAGENS
-    // =========================
-    static int contadorMensagens = 0;
-
-    // =========================
-    // IDENTIFICAÇÃO
-    // =========================
-    static String nomeServidor =
+    static String nome =
             "servidor-" + System.currentTimeMillis();
 
-    static int meuRank = 0;
+    static String coordenador = null;
 
-    static String coordenadorAtual = null;
-
-    // =========================
-    // HEARTBEAT
-    // =========================
-    static final int INTERVALO = 2000;
+    static List<String> historico =
+            new ArrayList<>();
 
     public static void main(String[] args) {
 
-        System.out.println("Servidor Java rodando...");
-
-        // =========================
-        // CONTEXTO ZMQ
-        // =========================
         ZMQ.Context context = ZMQ.context(1);
 
-        // =========================
-        // SOCKET BROKER
-        // =========================
         ZMQ.Socket socket =
                 context.socket(ZMQ.REP);
 
         socket.connect("tcp://broker:5556");
 
-        // =========================
-        // SOCKET COORDENADOR
-        // =========================
         ZMQ.Socket coord =
                 context.socket(ZMQ.REQ);
 
         coord.connect("tcp://coordenador:5560");
 
-        // =========================
-        // REGISTRO
-        // =========================
-        registrarServidor(coord);
+        ZMQ.Socket pub =
+                context.socket(ZMQ.PUB);
 
-        try {
+        pub.connect("tcp://proxy_pubsub:5557");
 
-            Value lista =
-                    pedirServidores(coord);
+        ZMQ.Socket sub =
+                context.socket(ZMQ.SUB);
 
-            System.out.println(
-                    "Lista recebida: " + lista
-            );
+        sub.connect("tcp://proxy_pubsub:5558");
 
-            coordenadorAtual =
-                    elegerCoordenador(lista);
+        sub.subscribe("replica".getBytes());
+        sub.subscribe("servers".getBytes());
 
-            System.out.println(
-                    "Coordenador atual: "
-                            + coordenadorAtual
-            );
+        registrar(coord);
 
-        } catch (Exception e) {
+        Value lista = pedir(coord);
 
-            e.printStackTrace();
-        }
+        coordenador = eleger(lista);
 
-        // =========================
-        // THREAD HEARTBEAT
-        // =========================
-        new Thread(() -> {
+        System.out.println(
+                "Coord inicial: " + coordenador
+        );
 
-            while (true) {
+        new Thread(
+                () -> heartbeat(coord)
+        ).start();
 
-                try {
+        new Thread(
+                () -> ouvir(sub)
+        ).start();
 
-                    verificarCoordenador(coord);
-
-                    Thread.sleep(INTERVALO);
-
-                } catch (Exception e) {
-
-                    System.out.println(
-                            "Erro heartbeat"
-                    );
-                }
-            }
-
-        }).start();
-
-        // =========================
-        // LOOP PRINCIPAL
-        // =========================
         while (true) {
 
             byte[] msg = socket.recv();
 
             try {
 
-                MessageUnpacker unpacker =
-                        MessagePack
-                                .newDefaultUnpacker(msg);
+                MessageUnpacker up =
+                        MessagePack.newDefaultUnpacker(msg);
 
-                Value v =
-                        unpacker.unpackValue();
+                Value v = up.unpackValue();
 
-                int clockRecebido = 0;
+                int recvClock = 0;
 
-                // =========================
-                // LER CLOCK
-                // =========================
                 if (v.isMapValue()) {
 
-                    MapValue map =
-                            v.asMapValue();
+                    MapValue map = v.asMapValue();
 
-                    for (Value key :
-                            map.map().keySet()) {
+                    for (Value k : map.map().keySet()) {
 
-                        if (key.asStringValue()
-                                .asString()
-                                .equals("clock")) {
+                        String key =
+                                k.asStringValue().asString();
 
-                            clockRecebido =
+                        if (key.equals("clock")) {
+
+                            recvClock =
                                     map.map()
-                                            .get(key)
+                                            .get(k)
                                             .asIntegerValue()
                                             .asInt();
                         }
                     }
                 }
 
-                // =========================
-                // CLOCK LÓGICO
-                // =========================
                 clock =
-                        Math.max(
-                                clock,
-                                clockRecebido
-                        ) + 1;
+                        Math.max(clock, recvClock) + 1;
 
-                System.out.println(
-                        "Clock servidor: "
-                                + clock
+                contador++;
+
+                String reg =
+                        nome + " clock=" + clock;
+
+                historico.add(reg);
+
+                Map<String, Object> replica =
+                        new HashMap<>();
+
+                replica.put("server", nome);
+                replica.put("clock", clock);
+                replica.put("msg", v.toString());
+
+                byte[] packed = pack(replica);
+
+                String hex = bytesToHex(packed);
+
+                pub.send(
+                        ("replica " + hex).getBytes()
                 );
 
-                // =========================
-                // CONTADOR MENSAGENS
-                // =========================
-                contadorMensagens++;
+                if (contador >= 15) {
 
-                System.out.println(
-                        "Mensagens trocadas: "
-                                + contadorMensagens
-                );
+                    sync(coord);
 
-                // =========================
-                // BERKELEY A CADA 15 MSG
-                // =========================
-                if (contadorMensagens >= 10) {
-
-                    sincronizarRelogio(coord);
-
-                    contadorMensagens = 0;
+                    contador = 0;
                 }
 
-                // =========================
-                // RESPOSTA
-                // =========================
-                MessageBufferPacker packer =
-                        MessagePack
-                                .newDefaultBufferPacker();
+                MessageBufferPacker p =
+                        MessagePack.newDefaultBufferPacker();
 
-                packer.packMapHeader(4);
+                p.packMapHeader(2);
 
-                // timestamp
-                packer.packString("timestamp");
-                packer.packDouble(
-                        System.currentTimeMillis()
-                                / 1000.0
-                );
+                p.packString("clock");
+                p.packInt(clock);
 
-                // clock
-                packer.packString("clock");
-                packer.packInt(clock);
+                p.packString("tipo");
+                p.packString("resposta");
 
-                // tipo
-                packer.packString("tipo");
-                packer.packString("resposta");
+                p.close();
 
-                // dados
-                packer.packString("dados");
-                packer.packString(
-                        "OK do servidor Java"
-                );
-
-                packer.close();
-
-                socket.send(
-                        packer.toByteArray()
-                );
+                socket.send(p.toByteArray());
 
             } catch (Exception e) {
 
@@ -224,163 +159,45 @@ public class Server {
     }
 
     // =========================
-    // REGISTRAR SERVIDOR
-    // =========================
-    public static void registrarServidor(
-            ZMQ.Socket coord
-    ) {
-
-        try {
-
-            MessageBufferPacker packer =
-                    MessagePack
-                            .newDefaultBufferPacker();
-
-            packer.packMapHeader(2);
-
-            packer.packString("tipo");
-            packer.packString("register");
-
-            packer.packString("dados");
-
-            packer.packMapHeader(1);
-
-            packer.packString("nome");
-            packer.packString(nomeServidor);
-
-            packer.close();
-
-            coord.send(
-                    packer.toByteArray()
-            );
-
-            byte[] reply = coord.recv();
-
-            MessageUnpacker unpacker =
-                    MessagePack
-                            .newDefaultUnpacker(reply);
-
-            Value v =
-                    unpacker.unpackValue();
-
-            System.out.println(
-                    "Registrado: " + v
-            );
-
-            MapValue map =
-                    v.asMapValue();
-
-            Value dados =
-                    map.map().get(
-                            ValueFactory
-                                    .newString("dados")
-                    );
-
-            meuRank =
-                    dados.asMapValue()
-                            .map()
-                            .get(
-                                    ValueFactory
-                                            .newString("rank")
-                            )
-                            .asIntegerValue()
-                            .asInt();
-
-            System.out.println(
-                    "Meu rank: " + meuRank
-            );
-
-        } catch (Exception e) {
-
-            e.printStackTrace();
-        }
-    }
-
-    // =========================
-    // PEDIR SERVIDORES
-    // =========================
-    public static Value pedirServidores(
-            ZMQ.Socket coord
-    ) throws Exception {
-
-        MessageBufferPacker packer =
-                MessagePack
-                        .newDefaultBufferPacker();
-
-        packer.packMapHeader(1);
-
-        packer.packString("tipo");
-        packer.packString("get_servers");
-
-        packer.close();
-
-        coord.send(
-                packer.toByteArray()
-        );
-
-        byte[] reply =
-                coord.recv();
-
-        MessageUnpacker unpacker =
-                MessagePack
-                        .newDefaultUnpacker(reply);
-
-        return unpacker.unpackValue();
-    }
-
-    // =========================
     // ELEIÇÃO
     // =========================
-    public static String elegerCoordenador(
-            Value resposta
-    ) {
 
-        int maiorRank = -1;
+    static String eleger(Value v) {
 
-        String eleito = null;
-
-        MapValue map =
-                resposta.asMapValue();
+        MapValue map = v.asMapValue();
 
         Value dados =
                 map.map().get(
-                        ValueFactory
-                                .newString("dados")
+                        ValueFactory.newString("dados")
                 );
 
-        if (dados == null
-                || !dados.isArrayValue()) {
+        String eleito = null;
 
-            return null;
-        }
+        int maior = -1;
 
-        for (Value item :
-                dados.asArrayValue()) {
+        for (Value s : dados.asArrayValue()) {
 
-            MapValue servidor =
-                    item.asMapValue();
+            MapValue m = s.asMapValue();
 
             String nome =
-                    servidor.map()
+                    m.map()
                             .get(
-                                    ValueFactory
-                                            .newString("nome")
+                                    ValueFactory.newString("nome")
                             )
                             .asStringValue()
                             .asString();
 
             int rank =
-                    servidor.map()
+                    m.map()
                             .get(
-                                    ValueFactory
-                                            .newString("rank")
+                                    ValueFactory.newString("rank")
                             )
                             .asIntegerValue()
                             .asInt();
 
-            if (rank > maiorRank) {
+            if (rank > maior) {
 
-                maiorRank = rank;
+                maior = rank;
 
                 eleito = nome;
             }
@@ -392,134 +209,248 @@ public class Server {
     // =========================
     // HEARTBEAT
     // =========================
-    public static void verificarCoordenador(
-            ZMQ.Socket coord
-    ) {
 
-        try {
+    static void heartbeat(ZMQ.Socket coord) {
 
-            MessageBufferPacker packer =
-                    MessagePack
-                            .newDefaultBufferPacker();
+        while (true) {
 
-            packer.packMapHeader(2);
+            try {
 
-            packer.packString("tipo");
-            packer.packString("heartbeat");
+                MessageBufferPacker p =
+                        MessagePack.newDefaultBufferPacker();
 
-            packer.packString("dados");
+                p.packMapHeader(2);
 
-            packer.packMapHeader(1);
+                p.packString("tipo");
+                p.packString("heartbeat");
 
-            packer.packString("nome");
-            packer.packString(nomeServidor);
+                p.packString("dados");
 
-            packer.close();
+                p.packMapHeader(1);
 
-            coord.send(
-                    packer.toByteArray()
-            );
+                p.packString("nome");
+                p.packString(nome);
 
-            coord.recv();
+                p.close();
 
-            Value lista =
-                    pedirServidores(coord);
+                coord.send(p.toByteArray());
 
-            System.out.println(
-                    "Lista heartbeat: "
-                            + lista
-            );
+                coord.recv();
 
-            String novo =
-                    elegerCoordenador(lista);
+                Thread.sleep(2000);
 
-            if (coordenadorAtual == null
-                    || !coordenadorAtual.equals(novo)) {
+            } catch (Exception e) {
 
-                System.out.println(
-                        "Novo coordenador eleito: "
-                                + novo
-                );
-
-                coordenadorAtual = novo;
+                System.out.println("heartbeat erro");
             }
-
-            System.out.println(
-                    "Coordenador atual: "
-                            + coordenadorAtual
-            );
-
-        } catch (Exception e) {
-
-            System.out.println(
-                    "Falha ao comunicar com coordenador"
-            );
         }
     }
 
     // =========================
-    // SINCRONIZAÇÃO BERKELEY
+    // BERKELEY
     // =========================
-    public static void sincronizarRelogio(
-            ZMQ.Socket coord
-    ) {
+
+    static void sync(ZMQ.Socket coord) {
 
         try {
 
-            MessageBufferPacker packer =
-                    MessagePack
-                            .newDefaultBufferPacker();
-
-            packer.packMapHeader(1);
-
-            packer.packString("tipo");
-            packer.packString("sync_clock");
-
-            packer.close();
-
             coord.send(
-                    packer.toByteArray()
+                    packSimple("sync_clock")
             );
 
-            byte[] reply =
-                    coord.recv();
+            coord.recv();
 
-            MessageUnpacker unpacker =
-                    MessagePack
-                            .newDefaultUnpacker(reply);
+        } catch (Exception e) {
 
-            Value resposta =
-                    unpacker.unpackValue();
+            System.out.println("erro sync");
+        }
+    }
 
-            MapValue map =
-                    resposta.asMapValue();
+    // =========================
+    // PACK SIMPLE
+    // =========================
 
-            Value dados =
-                    map.map().get(
-                            ValueFactory
-                                    .newString("dados")
-                    );
+    static byte[] packSimple(String t) {
 
-            int novaHora =
-                    dados.asMapValue()
-                            .map()
-                            .get(
-                                    ValueFactory
-                                            .newString("hora")
-                            )
-                            .asIntegerValue()
-                            .asInt();
+        try {
+
+            MessageBufferPacker p =
+                    MessagePack.newDefaultBufferPacker();
+
+            p.packMapHeader(1);
+
+            p.packString("tipo");
+            p.packString(t);
+
+            p.close();
+
+            return p.toByteArray();
+
+        } catch (Exception e) {
+
+            return new byte[0];
+        }
+    }
+
+    // =========================
+    // PACK
+    // =========================
+
+    static byte[] pack(Map<String, Object> m) {
+
+        try {
+
+            MessageBufferPacker p =
+                    MessagePack.newDefaultBufferPacker();
+
+            p.packMapHeader(m.size());
+
+            for (String k : m.keySet()) {
+
+                p.packString(k);
+
+                Object v = m.get(k);
+
+                if (v instanceof String) {
+
+                    p.packString((String) v);
+
+                } else if (v instanceof Integer) {
+
+                    p.packInt((Integer) v);
+
+                } else {
+
+                    p.packString(v.toString());
+                }
+            }
+
+            p.close();
+
+            return p.toByteArray();
+
+        } catch (Exception e) {
+
+            return new byte[0];
+        }
+    }
+
+    // =========================
+    // HEX
+    // =========================
+
+    static String bytesToHex(byte[] bytes) {
+
+        StringBuilder sb = new StringBuilder();
+
+        for (byte b : bytes) {
+
+            sb.append(
+                    String.format("%02x", b)
+            );
+        }
+
+        return sb.toString();
+    }
+
+    // =========================
+    // REGISTRAR
+    // =========================
+
+    static void registrar(ZMQ.Socket coord) {
+
+        try {
+
+            MessageBufferPacker p =
+                    MessagePack.newDefaultBufferPacker();
+
+            p.packMapHeader(2);
+
+            p.packString("tipo");
+            p.packString("register");
+
+            p.packString("dados");
+
+            p.packMapHeader(1);
+
+            p.packString("nome");
+            p.packString(nome);
+
+            p.close();
+
+            coord.send(p.toByteArray());
+
+            coord.recv();
 
             System.out.println(
-                    "Relógio sincronizado com coordenador: "
-                            + novaHora
+                    "Servidor Java registrado"
             );
 
         } catch (Exception e) {
 
-            System.out.println(
-                    "Erro sincronização Berkeley"
-            );
+            e.printStackTrace();
+        }
+    }
+
+    // =========================
+    // PEDIR SERVIDORES
+    // =========================
+
+    static Value pedir(ZMQ.Socket coord) {
+
+        try {
+
+            MessageBufferPacker p =
+                    MessagePack.newDefaultBufferPacker();
+
+            p.packMapHeader(1);
+
+            p.packString("tipo");
+            p.packString("get_servers");
+
+            p.close();
+
+            coord.send(p.toByteArray());
+
+            byte[] resp = coord.recv();
+
+            MessageUnpacker up =
+                    MessagePack.newDefaultUnpacker(resp);
+
+            return up.unpackValue();
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            return null;
+        }
+    }
+
+    // =========================
+    // OUVIR PUBSUB
+    // =========================
+
+    static void ouvir(ZMQ.Socket sub) {
+
+        while (true) {
+
+            try {
+
+                String msg =
+                        new String(sub.recv());
+
+                if (msg.contains("replica")) {
+
+                    System.out.println(
+                            "Replica: " + msg
+                    );
+                }
+
+            } catch (Exception e) {
+
+                e.printStackTrace();
+            }
         }
     }
 }
