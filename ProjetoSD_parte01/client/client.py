@@ -78,3 +78,4 @@ while True:
         time.sleep(1.0)
     
     time.sleep(2.0)
+    print(">>> Bloco de mensagens concluído. Aguardando próximo ciclo...")
