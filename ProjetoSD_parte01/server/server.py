@@ -64,8 +64,13 @@ def registrar():
     print("Registrado rank:", rank)
 
 def pedir_servidores():
-    coord.send(msgpack.packb({"tipo": "get_servers"}))
-    return msgpack.unpackb(coord.recv(), raw=False)
+    context_tmp = zmq.Context.instance()
+    sock_tmp = context_tmp.socket(zmq.REQ)
+    sock_tmp.connect("tcp://coordenador:5560")
+    sock_tmp.send(msgpack.packb({"tipo": "get_servers"}))
+    resp = msgpack.unpackb(sock_tmp.recv(), raw=False)
+    sock_tmp.close()
+    return resp
 
 def eleger(lista):
     maior = -1
@@ -121,7 +126,7 @@ def ouvir_pubsub():
                 elif tipo_b == "ajuste_tempo":
                     ajustes = payload.get("ajustes", {})
                     if nome in ajustes:
-                        relogio_fisico_local += adjustments = ajustes[nome]
+                        relogio_fisico_local += ajustes[nome]
                         print(f"[Berkeley] Relógio físico ajustado em {ajustes[nome]}s. Novo tempo: {relogio_fisico_local}")
                         
         except Exception as e:
@@ -243,10 +248,8 @@ while True:
         else:
             resposta = {"tipo": "erro", "dados": "comando desconhecido", "clock": clock_logico}
 
-        # Envia a resposta estrita ao broker (REP) antes de qualquer outra comunicação de rede
         socket.send(msgpack.packb(resposta))
 
-        # Realiza a replicação passiva/ativa em segundo plano
         registro = {
             "server": nome,
             "msg": msg,
@@ -255,11 +258,11 @@ while True:
         historico.append(registro)
         pub.send_string("replica " + msgpack.packb({"tipo": "replica", "dados": registro}).hex())
 
-        # Gerenciamento seguro dos gatilhos de Heartbeat e Berkeley
         if contador >= 10:
             try:
                 coord.send(msgpack.packb({"tipo": "heartbeat", "dados": {"nome": nome}}))
                 coord.recv()
+                
                 lista_srv = pedir_servidores()
                 novo_coord = eleger(lista_srv)
                 if novo_coord and novo_coord != coordenador:

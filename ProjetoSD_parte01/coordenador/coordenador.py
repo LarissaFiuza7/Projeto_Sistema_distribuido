@@ -53,7 +53,19 @@ while True:
         time.sleep(0.5)
         continue
 
-    data = msgpack.unpackb(msg, raw=False)
+    try:
+        # Se vier dado extra grudado na rede, o lenient_unpack impede o container de quebrar
+        data = msgpack.unpackb(msg, extra_bytes=b'', raw=False)
+    except Exception as e_pack:
+        # Pega apenas a primeira parte válida da mensagem caso haja estouro de buffer
+        try:
+            unpacker = msgpack.Unpacker()
+            unpacker.feed(msg)
+            data = unpacker.unpack()
+        except:
+            print("Erro ao decodificar pacote corrompido:", e_pack)
+            continue
+
     tipo = data.get("tipo")
     dados = data.get("dados", {})
 

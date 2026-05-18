@@ -80,7 +80,7 @@ public class Client {
 
         try {
             Map<String, Object> dadosLogin = new HashMap<>();
-            dadosLogin.put("usuario", "Beatriz-Java");
+            dadosLogin.put("usuario", "Larissa-Java");
             socketReq.send(criarMensagem("login", dadosLogin));
             
             Value respLogin = receberEResponder(socketReq);
@@ -142,7 +142,7 @@ public class Client {
                 for (int i = 0; i < 10; i++) {
                     Map<String, Object> dadosPublicacao = new HashMap<>();
                     dadosPublicacao.put("canal", canalEscolhido);
-                    dadosPublicacao.put("mensagem", "Mensagem automatizada " + i + " de Beatriz-Java");
+                    dadosPublicacao.put("mensagem", "Mensagem automatizada " + i + " de Larissa-Java");
 
                     socketReq.send(criarMensagem("publish", dadosPublicacao));
                     
